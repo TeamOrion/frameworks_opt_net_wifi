@@ -57,19 +57,11 @@ class WifiController extends StateMachine {
     private long mIdleMillis;
     private int mSleepPolicy;
     private boolean mFirstUserSignOnSeen = false;
+    private int mDefaultWifiIdleMs;
 
     private AlarmManager mAlarmManager;
     private PendingIntent mIdleIntent;
     private static final int IDLE_REQUEST = 0;
-
-    /**
-     * See {@link Settings.Global#WIFI_IDLE_MS}. This is the default value if a
-     * Settings.Global value is not present. This timeout value is chosen as
-     * the approximate point at which the battery drain caused by Wi-Fi
-     * being enabled but not active exceeds the battery drain caused by
-     * re-establishing a connection to the mobile data network.
-     */
-    private static final long DEFAULT_IDLE_MS = 15 * 60 * 1000; /* 15 minutes */
 
     /**
      * See {@link Settings.Global#WIFI_REENABLE_DELAY_MS}.  This is the default value if a
@@ -126,6 +118,7 @@ class WifiController extends StateMachine {
     private StaDisabledWithScanState mStaDisabledWithScanState = new StaDisabledWithScanState();
     private ApEnabledState mApEnabledState = new ApEnabledState();
     private DeviceActiveState mDeviceActiveState = new DeviceActiveState();
+    private DeviceActiveHighPerfState mDeviceActiveHighPerfState = new DeviceActiveHighPerfState();
     private DeviceInactiveState mDeviceInactiveState = new DeviceInactiveState();
     private ScanOnlyLockHeldState mScanOnlyLockHeldState = new ScanOnlyLockHeldState();
     private FullLockHeldState mFullLockHeldState = new FullLockHeldState();
@@ -139,6 +132,8 @@ class WifiController extends StateMachine {
         mWifiStateMachine = service.mWifiStateMachine;
         mSettingsStore = service.mSettingsStore;
         mLocks = service.mLocks;
+        mDefaultWifiIdleMs = context.getResources().getInteger(com.android.internal.
+            R.integer.def_wifi_idle_ms);
 
         mAlarmManager = (AlarmManager)mContext.getSystemService(Context.ALARM_SERVICE);
         Intent idleIntent = new Intent(ACTION_DEVICE_IDLE, null);
@@ -148,6 +143,7 @@ class WifiController extends StateMachine {
             addState(mApStaDisabledState, mDefaultState);
             addState(mStaEnabledState, mDefaultState);
                 addState(mDeviceActiveState, mStaEnabledState);
+                    addState(mDeviceActiveHighPerfState, mDeviceActiveState);
                 addState(mDeviceInactiveState, mStaEnabledState);
                     addState(mScanOnlyLockHeldState, mDeviceInactiveState);
                     addState(mFullLockHeldState, mDeviceInactiveState);
@@ -222,7 +218,7 @@ class WifiController extends StateMachine {
 
     private void readWifiIdleTime() {
         mIdleMillis = Settings.Global.getLong(mContext.getContentResolver(),
-                Settings.Global.WIFI_IDLE_MS, DEFAULT_IDLE_MS);
+                Settings.Global.WIFI_IDLE_MS, mDefaultWifiIdleMs);
     }
 
     private void readWifiSleepPolicy() {
@@ -431,7 +427,7 @@ class WifiController extends StateMachine {
                             break;
                         }
                         if (mDeviceIdle == false) {
-                            transitionTo(mDeviceActiveState);
+                            checkLocksAndTransitionWhenDeviceActive();
                         } else {
                             checkLocksAndTransitionWhenDeviceIdle();
                         }
@@ -567,7 +563,7 @@ class WifiController extends StateMachine {
                             break;
                         }
                         if (mDeviceIdle == false) {
-                            transitionTo(mDeviceActiveState);
+                            checkLocksAndTransitionWhenDeviceActive();
                         } else {
                             checkLocksAndTransitionWhenDeviceIdle();
                         }
@@ -725,7 +721,7 @@ class WifiController extends StateMachine {
             if (exitEcm) {
                 if (mSettingsStore.isWifiToggleEnabled()) {
                     if (mDeviceIdle == false) {
-                        transitionTo(mDeviceActiveState);
+                        checkLocksAndTransitionWhenDeviceActive();
                     } else {
                         checkLocksAndTransitionWhenDeviceIdle();
                     }
@@ -752,6 +748,9 @@ class WifiController extends StateMachine {
             if (msg.what == CMD_DEVICE_IDLE) {
                 checkLocksAndTransitionWhenDeviceIdle();
                 // We let default state handle the rest of work
+            } else if (msg.what == CMD_LOCKS_CHANGED) {
+                checkLocksAndTransitionWhenDeviceActive();
+                return HANDLED;
             } else if (msg.what == CMD_USER_PRESENT) {
                 // TLS networks can't connect until user unlocks keystore. KeyStore
                 // unlocks when the user punches PIN after the reboot. So use this
@@ -766,6 +765,16 @@ class WifiController extends StateMachine {
         }
     }
 
+    /* Parent: DeviceActiveState. Device is active, and an app is holding a high perf lock. */
+    class DeviceActiveHighPerfState extends State {
+        @Override
+        public void enter() {
+            mWifiStateMachine.setOperationalMode(WifiStateMachine.CONNECT_MODE);
+            mWifiStateMachine.setDriverStart(true);
+            mWifiStateMachine.setHighPerfModeEnabled(true);
+        }
+    }
+
     /* Parent: StaEnabledState */
     class DeviceInactiveState extends State {
         @Override
@@ -776,7 +785,7 @@ class WifiController extends StateMachine {
                     updateBatteryWorkSource();
                     return HANDLED;
                 case CMD_SCREEN_ON:
-                    transitionTo(mDeviceActiveState);
+                    checkLocksAndTransitionWhenDeviceActive();
                     // More work in default state
                     return NOT_HANDLED;
                 default:
@@ -819,6 +828,17 @@ class WifiController extends StateMachine {
         @Override
         public void enter() {
             mWifiStateMachine.setDriverStart(false);
+        }
+    }
+
+    private void checkLocksAndTransitionWhenDeviceActive() {
+        if (mLocks.hasLocks() && mLocks.getStrongestLockMode() == WIFI_MODE_FULL_HIGH_PERF) {
+            // It is possible for the screen to be off while the device is
+            // is active (mIdleMillis), so we need the high-perf mode
+            // otherwise powersaving mode will be turned on.
+            transitionTo(mDeviceActiveHighPerfState);
+        } else {
+            transitionTo(mDeviceActiveState);
         }
     }
 

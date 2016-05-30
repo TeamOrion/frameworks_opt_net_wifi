@@ -1174,6 +1174,21 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
                 com.android.internal.R.bool.config_wifi_dual_band_support);
     }
 
+     /**
+     * Is Ad-Hoc (IBSS) mode supported by the driver?
+     * Will only return correct results when we have reached WIFI_STATE_ENABLED
+     * @return {@code true} if IBSS mode is supported, {@code false} if not
+     */
+    public boolean isIbssSupported() {
+        enforceAccessPermission();
+        if (mWifiStateMachineChannel != null) {
+            return (mWifiStateMachine.syncIsIbssSupported(mWifiStateMachineChannel) == 1);
+        } else {
+            Slog.e(TAG, "mWifiStateMachineChannel is not initialized");
+            return false;
+        }
+    }
+
     /**
      * Return the DHCP-assigned addresses from the last successful DHCP request,
      * if any.
@@ -1428,6 +1443,22 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
                 if (wifiApState == WifiManager.WIFI_AP_STATE_FAILED) {
                     setWifiApEnabled(null, false);
                 }
+            } else if (action.equals(WifiManager.WIFI_STATE_CHANGED_ACTION)) {
+                int wifiState = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE,
+                        WifiManager.WIFI_STATE_UNKNOWN);
+                /*
+                 * If Wi-Fi turn on fails, WifiStateMachine stays in InitialState,
+                 * but WifiController is left stuck in StaEnabledState, which in turn
+                 * fails to turn on WLAN again.
+                 *
+                 * Register WifiService to receive WIFI_STATE_CHANGED_ACTION intent
+                 * from WifiStateMachine, and if wifiState is failed, inform WifiController
+                 * to transtion to ApStaDisabledState.
+                 */
+                if (wifiState == WifiManager.WIFI_STATE_FAILED) {
+                    Slog.e(TAG, "Wi-Fi state is failed");
+                    setWifiEnabled(false);
+                }
             }
         }
     };
@@ -1456,6 +1487,7 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
         intentFilter.addAction(Intent.ACTION_SCREEN_OFF);
         intentFilter.addAction(Intent.ACTION_BATTERY_CHANGED);
         intentFilter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+        intentFilter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         intentFilter.addAction(WifiManager.WIFI_AP_STATE_CHANGED_ACTION);
         intentFilter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
         intentFilter.addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
@@ -1466,6 +1498,7 @@ public final class WifiServiceImpl extends IWifiManager.Stub {
         if (trackEmergencyCallState) {
             intentFilter.addAction(TelephonyIntents.ACTION_EMERGENCY_CALL_STATE_CHANGED);
         }
+
         mContext.registerReceiver(mReceiver, intentFilter);
     }
 
